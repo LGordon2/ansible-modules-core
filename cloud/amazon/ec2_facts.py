@@ -48,9 +48,10 @@ EXAMPLES = '''
   action: debug msg="This instance is a t1.micro"
   when: ansible_ec2_instance_type == "t1.micro"
 '''
-   
+
 import socket
 import re
+import json
 
 socket.setdefaulttimeout(5)
 
@@ -73,20 +74,19 @@ class Ec2Metadata(object):
                    )
 
     def __init__(self, module, ec2_metadata_uri=None, ec2_sshdata_uri=None, ec2_userdata_uri=None):
-        self.module   = module
-        self.uri_meta = ec2_metadata_uri or self.ec2_metadata_uri
-        self.uri_user = ec2_userdata_uri or self.ec2_userdata_uri
-        self.uri_ssh  =  ec2_sshdata_uri or self.ec2_sshdata_uri
-        self._data     = {}
+        self.module    = module
+        self.uri_meta  = ec2_metadata_uri or self.ec2_metadata_uri
+        self.uri_user  = ec2_userdata_uri or self.ec2_userdata_uri
+        self.uri_ssh   =  ec2_sshdata_uri or self.ec2_sshdata_uri
+        self._data     = dict()
         self._prefix   = 'ansible_ec2_%s'
 
     def _fetch(self, url):
         (response, info) = fetch_url(self.module, url, force=True)
         if response:
-            data = response.read()
-        else:
-            data = None
-        return data
+            return response.read()
+
+        return None
 
     def _mangle_fields(self, fields, uri, filter_patterns=['public-keys-0']):
         new_fields = {}
@@ -94,14 +94,14 @@ class Ec2Metadata(object):
             split_fields = key[len(uri):].split('/')
             if len(split_fields) > 1 and split_fields[1]:
                 new_key = "-".join(split_fields)
-                new_fields[self._prefix % new_key] = value
+                new_fields[new_key] = value
             else:
                 new_key = "".join(split_fields)
-                new_fields[self._prefix % new_key] = value
+                new_fields[new_key] = value
         for pattern in filter_patterns:
             for key in new_fields.keys():
                 match = re.search(pattern, key)
-                if match: 
+                if match:
                     new_fields.pop(key)
         return new_fields
 
@@ -121,15 +121,18 @@ class Ec2Metadata(object):
                 content = self._fetch(new_uri)
                 if field == 'security-groups':
                     sg_fields = ",".join(content.split('\n'))
-                    self._data['%s' % (new_uri)]  = sg_fields
+                    self._data['%s' % new_uri] = sg_fields
                 else:
-                    self._data['%s' % (new_uri)] = content
+                    try:
+                        self._data['%s' % new_uri] = json.loads(content)
+                    except Exception:
+                        self._data['%s' % new_uri] = content
 
     def fix_invalid_varnames(self, data):
         """Change ':'' and '-' to '_' to ensure valid template variable names"""
         for (key, value) in data.items():
             if ':' in key or '-' in key:
-                newkey = key.replace(':','_').replace('-','_')
+                newkey = key.replace(':', '_').replace('-', '_')
                 del data[key]
                 data[newkey] = value
 
@@ -154,9 +157,8 @@ class Ec2Metadata(object):
 
     def run(self):
         self.fetch(self.uri_meta) # populate _data
-        data = self._mangle_fields(self._data, self.uri_meta)
-        data[self._prefix % 'user-data'] = self._fetch(self.uri_user)
-        data[self._prefix % 'public-key'] = self._fetch(self.uri_ssh)
+        data = dict(ansible_ec2=self._mangle_fields(self._data, self.uri_meta))
+        data['ansible_ec2'].update(dict(user_data=self._fetch(self.uri_user), public_key=self._fetch(self.uri_ssh)))
         self.fix_invalid_varnames(data)
         self.add_ec2_region(data)
         return data
